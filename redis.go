@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"strconv"
@@ -19,29 +18,16 @@ import (
 )
 
 type RedisSessionTokenData struct {
-	SessionID       string    `json:"session_id"`
-	SessionExpiryDt time.Time `json:"session_expiry_dt"`
-	Token           []byte    `json:"token"`
-	TokenExpiryDt   time.Time `json:"token_expiry_dt"`
-	TokenEncrypted  int       `json:"token_encrypted"`
+	SessionID       string    `json:"SessionID"`
+	SessionExpiryDt time.Time `json:"SessionExpiryDt"`
+	Token           []byte    `json:"Token"`
+	TokenExpiryDt   time.Time `json:"TokenExpiryDt"`
+	TokenEncrypted  int       `json:"TokenEncrypted"`
+	UserId          string    `json:"UserId"`
+	LastDayUsed     time.Time `json:"LastDayUsed"`
 }
 
-//// create a new SessionTokenMiddleware struct with default values
-//func New() *SessionTokenMiddleware {
-//
-//	rs := SessionTokenMiddleware{
-//		ClientType:  defaultClientType,
-//		Host:        []string{defaultHost},
-//		Port:        []string{defaultPort},
-//		DB:          defaultDb,
-//		KeyPrefix:   defaultKeyPrefix,
-//		TlsEnabled:  defaultTLS,
-//		TlsInsecure: defaultTLSInsecure,
-//	}
-//	return &rs
-//}
-
-// Initilalize Redis client and locker
+// Initialize Redis client and locker
 func (m *SessionTokenMiddleware) initRedisClient(ctx context.Context) error {
 
 	// Configure options for all client types
@@ -51,6 +37,7 @@ func (m *SessionTokenMiddleware) initRedisClient(ctx context.Context) error {
 		Username:   m.Username,
 		Password:   m.Password,
 		DB:         m.DB,
+		//Protocol:   2,
 	}
 
 	// Configure timeout values if defined
@@ -159,53 +146,67 @@ func (m *SessionTokenMiddleware) Store(ctx context.Context, sessionId string, to
 		encryptionFlag = 1
 	}
 
-	sd := &RedisSessionTokenData{
-		SessionID:       sessionId,
-		SessionExpiryDt: sessionExpiryDt,
-		Token:           token,
-		TokenExpiryDt:   tokenExpiryDt,
-		TokenEncrypted:  encryptionFlag,
-	}
-
-	jsonValue, err := json.Marshal(sd)
-	if err != nil {
-		return fmt.Errorf("Unable to marshal value for %s: %v", sessionId, err)
-	}
-
 	var prefixedKey = m.prefixKey(sessionId)
 
 	// Store the key value in the Redis database
-	if err := m.client.Set(ctx, prefixedKey, jsonValue, 0).Err(); err != nil {
-		return fmt.Errorf("Unable to set value for sessionId %s: %v", sessionId, err)
+	err := m.client.HSet(ctx, prefixedKey, map[string]interface{}{
+		"SessionID":       sessionId,
+		"SessionExpiryDt": sessionExpiryDt,
+		"Token":           sessionId,
+		"TokenExpiryDt":   sessionExpiryDt,
+		"TokenEncrypted":  encryptionFlag,
+		"UserId":          "",
+		"LastDayUsed":     time.Now(),
+	}).Err()
+
+	if err != nil {
+		return fmt.Errorf("unable to set value for sessionId %s: %v", sessionId, err)
 	}
 
 	return nil
 }
 
-func (m *SessionTokenMiddleware) Load(ctx context.Context, sessionId string) (*RedisSessionTokenData, error) {
+func (m *SessionTokenMiddleware) Load(ctx context.Context, sessionId string) (string, error) {
 
-	var sd *RedisSessionTokenData
-	var token []byte
-	var err error
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // Bijvoorbeeld 5 seconden
+	defer cancel()
 
-	sd, err = m.loadStorageData(ctx, sessionId)
-	if err != nil {
-		return nil, err
+	prefixedKey := m.prefixKey(sessionId)
+
+	m.logger.Infof("Loading data for key: %s")
+	data, err := m.client.HMGet(ctx, prefixedKey, "Token", "DayLastUsed", "TokenEncrypted").Result()
+
+	if data == nil || errors.Is(err, redis.Nil) {
+		return "", fmt.Errorf("unable to get data for  %s: %v", prefixedKey, err)
+	} else if err != nil {
+		return "", fmt.Errorf("error in getting data for %s: %v", prefixedKey, err)
 	}
 
+	token := data[0]
+	lastDayUsed := data[1]
+	tokenEncrypted := data[2]
+	//m.logger.Infof("Loaded session data: %v", token)
+
+	intTokenEncrypted, _ := tokenEncrypted.(int)
 	// Decrypt value if encrypted
-	if sd.TokenEncrypted > 0 {
-		token, err = m.decrypt(sd.Token)
+	if intTokenEncrypted > 0 {
+		byteToken, _ := token.([]byte)
+		token, err = m.decrypt(byteToken)
 		if err != nil {
-			return nil, fmt.Errorf("Unable to decrypt value for %s: %v", sessionId, err)
+			return "", fmt.Errorf("Unable to decrypt value for %s: %v", sessionId, err)
 		}
-		sd.Token = token
 	}
 
-	// store last usage (for progressive session expiration)
-	m.client.Set(ctx, m.prefixLastUsage(sessionId), time.Now(), 0)
+	timeLastDayUsed, _ := lastDayUsed.(time.Time)
+	now := time.Now()
+	// if last day used is not today, update it
+	if timeLastDayUsed.Day() != now.Day() || timeLastDayUsed.Month() != now.Month() || timeLastDayUsed.Year() != now.Year() {
+		// store last usage (for progressive session expiration)
+		m.client.HSet(ctx, m.prefixLastUsage(sessionId), "LastDayUsed", time.Now())
+	}
 
-	return sd, nil
+	strToken, _ := token.(string)
+	return strToken, nil
 }
 
 func (m *SessionTokenMiddleware) Delete(ctx context.Context, sessionId string) error {
@@ -293,7 +294,7 @@ func (m *SessionTokenMiddleware) Unlock(ctx context.Context, name string) error 
 }
 
 func (m *SessionTokenMiddleware) prefixKey(key string) string {
-	return path.Join(m.KeyPrefix, key)
+	return m.KeyPrefix + key
 }
 
 func (m *SessionTokenMiddleware) prefixLock(key string) string {
@@ -304,21 +305,10 @@ func (m *SessionTokenMiddleware) prefixLastUsage(key string) string {
 	return m.prefixKey(path.Join("last_usage_", key))
 }
 
-func (m *SessionTokenMiddleware) loadStorageData(ctx context.Context, key string) (*RedisSessionTokenData, error) {
-
-	data, err := m.client.Get(ctx, m.prefixKey(key)).Bytes()
-	if data == nil || errors.Is(err, redis.Nil) {
-		return nil, fs.ErrNotExist
-	} else if err != nil {
-		return nil, fmt.Errorf("Unable to get data for %s: %v", key, err)
-	}
-
-	sd := &RedisSessionTokenData{}
-	if err := json.Unmarshal(data, sd); err != nil {
-		return nil, fmt.Errorf("Unable to unmarshal value for %s: %v", key, err)
-	}
-
-	return sd, nil
+func (m *SessionTokenMiddleware) pingRedis(ctx context.Context) error {
+	pong, err := m.client.Ping(ctx).Result()
+	fmt.Println("Redis Ping:", pong)
+	return err
 }
 
 func (m *SessionTokenMiddleware) String() string {

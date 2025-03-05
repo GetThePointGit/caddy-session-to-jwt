@@ -1,0 +1,19 @@
+{
+    order session_to_jwt before reverse_proxy # Or after, depending on needs.
+}
+
+:80 {
+  session_to_jwt {
+    host localhost
+    port 6379
+    db 0
+    password "radijs"
+    key_prefix "SessionID:"
+  }
+
+  route /test {
+    respond "Session to JWT conversion successful"
+  }
+
+  reverse_proxy localhost:3000
+}

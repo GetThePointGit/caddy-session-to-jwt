@@ -18,44 +18,6 @@ import (
 	"time"
 )
 
-const (
-	// For development purposes, get jwt from url
-	defaultGetJwtFromUrl = false
-
-	// For development purposes, get jwt from url
-	defaultJwtUrl = "http://localhost:3000/api/getdev-jwt"
-
-	// Redis client type
-	defaultClientType = "simple"
-
-	// Redis server host
-	defaultHost = "127.0.0.1"
-
-	// Redis server port
-	defaultPort = "6379"
-
-	// Redis server database
-	defaultDb = 0
-
-	// Prepended to every Redis key
-	defaultKeyPrefix = "caddy"
-
-	// Connect to Redis via TLS
-	defaultTLS = false
-
-	// Do not verify TLS cerficate
-	defaultTLSInsecure = true
-
-	// Redis lock time-to-live
-	lockTTL = 5 * time.Second
-
-	// Delay between attempts to obtain Lock
-	lockPollInterval = 1 * time.Second
-
-	// How frequently the Lock's TTL should be updated
-	lockRefreshInterval = 3 * time.Second
-)
-
 // RedisStorage implements a Caddy storage backend for Redis
 // It supports Single (Standalone), Cluster, or Sentinal (Failover) Redis server configurations.
 type SessionTokenMiddleware struct {
@@ -148,16 +110,18 @@ func (m SessionTokenMiddleware) parseJwtFromUrl(body io.Reader) (string, time.Ti
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (m SessionTokenMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	sessionID, err := r.Cookie("sessionId")
+	sessionID, err := r.Cookie("authjs.session-token")
 	if err != nil {
 		// Cookie not present, continue to the next handler
 		return next.ServeHTTP(w, r)
 	}
+	m.logger.Info("Session ID found: ", sessionID.Value)
 	// Check if session ID is in the map
-	session, err := m.Load(m.ctx, sessionID.Value)
-	token := session.Token
+	m.logger.Info("context ", m.ctx)
+	token, err := m.Load(m.ctx, sessionID.Value)
+	m.logger.Info("token ", zap.String("token", token))
 
-	if err != nil {
+	if token == "" && err != nil {
 		// if no session found, check if jwt can be obtained from url
 		if m.GetJwtFromUrl {
 			// request jwt from url, using sessionID as a parameter
@@ -175,14 +139,14 @@ func (m SessionTokenMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request
 			if err := m.Store(m.ctx, sessionID.Value, tokenBytes, expiryToken, expirySession); err != nil {
 				m.logger.Error("Error storing JWT in Redis", zap.Error(err))
 			}
+		} else {
+			// Session ID not found, just continue to the next handler
+			m.logger.Info("Session ID not found", zap.String("session_id", sessionID.Value))
+			return next.ServeHTTP(w, r)
 		}
-
-		// Session ID not found, just continue to the next handler
-		m.logger.Info("Session ID not found in map", zap.String("session_id", sessionID.Value))
-		return next.ServeHTTP(w, r)
 	}
 
-	if token != nil {
+	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+string(token))
 		// todo: extend session expiry time if needed
 

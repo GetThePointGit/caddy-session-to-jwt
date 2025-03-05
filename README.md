@@ -18,12 +18,18 @@ todo:
 
 ```text
 
-<site> {
-    sessiontojwt {
-        ...
-    }
-    ...
+:80 {
+  session_to_jwt {
+    host localhost
+    port 6379
+    db 0
+    password "wachtwoord"
+    key_prefix "SessionID:"
+  }
+
+  reverse_proxy localhost:3000
 }
+
 
 ```
 

@@ -10,6 +10,45 @@ import (
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"net"
 	"strconv"
+	"time"
+)
+
+const (
+	// For development purposes, get jwt from url
+	defaultGetJwtFromUrl = false
+
+	// For development purposes, get jwt from url
+	defaultJwtUrl = "http://localhost:3000/api/getdev-jwt"
+
+	// Redis client type
+	defaultClientType = "simple"
+
+	// Redis server host
+	defaultHost = "127.0.0.1"
+
+	// Redis server port
+	defaultPort = "6379"
+
+	// Redis server database
+	defaultDb = 0
+
+	// Prepended to every Redis key
+	defaultKeyPrefix = "SessionID:"
+
+	// Connect to Redis via TLS
+	defaultTLS = false
+
+	// Do not verify TLS cerficate
+	defaultTLSInsecure = true
+
+	// Redis lock time-to-live
+	lockTTL = 5 * time.Second
+
+	// Delay between attempts to obtain Lock
+	lockPollInterval = 1 * time.Second
+
+	// How frequently the Lock's TTL should be updated
+	lockRefreshInterval = 3 * time.Second
 )
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler.
@@ -120,6 +159,7 @@ func (m *SessionTokenMiddleware) UnmarshalCaddyfile(d *caddyfile.Dispenser) erro
 func (m *SessionTokenMiddleware) Provision(ctx caddy.Context) error {
 
 	m.logger = ctx.Logger().Sugar()
+	m.logger.Info("Provisioning Session Token Middleware")
 
 	// Abstract this logic for testing purposes
 	err := m.finalizeConfiguration(ctx)
