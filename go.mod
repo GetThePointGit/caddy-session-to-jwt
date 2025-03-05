@@ -1,4 +1,4 @@
-module caddy-session-to-jwt
+module github.com/GetThePointGit/caddy-session-to-jwt
 
 go 1.22.3
 
