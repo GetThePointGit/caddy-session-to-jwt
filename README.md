@@ -37,7 +37,7 @@ todo:
 
 1. installeer go
 2. installeer `xcaddy`, zie binaries op https://github.com/caddyserver/xcaddy/releases
-3. build with command `./xcaddy build --with github.com/GetThePointGit/caddy-session_to_jwt=./`
+3. build with command `./xcaddy build --with github.com/GetThePointGit/caddy-session-to-jwt=./`
 
 4. run caddy with `./caddy run`
 

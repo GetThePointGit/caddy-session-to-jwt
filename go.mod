@@ -1,4 +1,4 @@
-module caddy-session_to_jwt
+module caddy-session-to-jwt
 
 go 1.22.3
 
