@@ -113,6 +113,7 @@ func (m SessionTokenMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request
 	sessionID, err := r.Cookie("__Secure-authjs.session-token")
 	if err != nil {
 		// Cookie not present, continue to the next handler
+		m.logger.Info("no session cookie found")
 		return next.ServeHTTP(w, r)
 	}
 	m.logger.Info("Session ID found: ", sessionID.Value)
