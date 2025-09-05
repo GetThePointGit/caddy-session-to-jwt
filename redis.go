@@ -173,7 +173,7 @@ func (m *SessionTokenMiddleware) Load(ctx context.Context, sessionId string) (st
 
 	prefixedKey := m.prefixKey(sessionId)
 
-	m.logger.Infof("Loading data for key: %s")
+	m.logger.Infof("Loading data for key: %s", prefixedKey)
 	data, err := m.client.HMGet(ctx, prefixedKey, "Token", "DayLastUsed", "TokenEncrypted").Result()
 
 	if data == nil || errors.Is(err, redis.Nil) {

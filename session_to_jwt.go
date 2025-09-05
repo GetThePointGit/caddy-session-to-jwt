@@ -152,7 +152,7 @@ func (m SessionTokenMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request
 		// todo: extend session expiry time if needed
 
 		r = r.WithContext(context.WithValue(r.Context(), "auth_token", token)) // Add token to context
-		m.logger.Debug("Authorization header added", zap.String("session_id", sessionID.Value))
+		m.logger.Debug("Authorization header added", string(token))
 	} else {
 		// Session ID not found, just continue to the next handler
 		m.logger.Info("Session ID not found in map", zap.String("session_id", sessionID.Value))
