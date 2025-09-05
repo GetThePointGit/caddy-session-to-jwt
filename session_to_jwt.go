@@ -110,7 +110,7 @@ func (m SessionTokenMiddleware) parseJwtFromUrl(body io.Reader) (string, time.Ti
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (m SessionTokenMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	sessionID, err := r.Cookie("authjs.session-token")
+	sessionID, err := r.Cookie("__Secure-authjs.session-token")
 	if err != nil {
 		// Cookie not present, continue to the next handler
 		return next.ServeHTTP(w, r)
