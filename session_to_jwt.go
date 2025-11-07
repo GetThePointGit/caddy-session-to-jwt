@@ -154,8 +154,9 @@ func (m SessionTokenMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request
 		r = r.WithContext(context.WithValue(r.Context(), "auth_token", token)) // Add token to context
 		m.logger.Debug("Authorization header added", string(token))
 		// log all Header values
+		m.logger.Debug("Header length", len(r.Header))
 		for name, values := range r.Header {
-	    m.logger.Debugw("request header", "key", name, "values", strings.Join(values, ","))
+	    m.logger.Debug("request header" + "key" + name + "values" + strings.Join(values, ","))
     }
 	} else {
 		// Session ID not found, just continue to the next handler
