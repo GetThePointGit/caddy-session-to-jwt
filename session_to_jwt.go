@@ -1,175 +1,158 @@
 package session_to_jwt
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
-	"github.com/bsm/redislock"
+	"io"
+	"net/http"
+	"time"
+
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
-	"github.com/redis/go-redis/v9"
-	"io"
-	"sync"
-
 	"go.uber.org/zap"
-	"net/http"
-	"time"
 )
 
-// RedisStorage implements a Caddy storage backend for Redis
-// It supports Single (Standalone), Cluster, or Sentinal (Failover) Redis server configurations.
-type SessionTokenMiddleware struct {
-	GetJwtFromUrl bool   `json:"get_jwt_from_url"`
-	JwtUrl        string `json:"jwt_url"`
-
-	// ClientType specifies the Redis client type. Valid values are "cluster" or "failover"
-	ClientType string `json:"client_type"`
-	// Address The full address of the Redis server. Example: "127.0.0.1:6379"
-	// If not defined, will be generated from Host and Port parameters.
-	Address []string `json:"address"`
-	// Host The Redis server hostname or IP address. Default: "127.0.0.1"
-	Host []string `json:"host"`
-	// Host The Redis server port number. Default: "6379"
-	Port []string `json:"port"`
-	// DB The Redis server database number. Default: 0
-	DB int `json:"db"`
-	// Timeout The Redis server timeout in seconds. Default: 5
-	Timeout string `json:"timeout"`
-	// Username The username for authenticating with the Redis server. Default: "" (No authentication)
-	Username string `json:"username"`
-	// Password The password for authenticating with the Redis server. Default: "" (No authentication)
-	Password string `json:"password"`
-	// MasterName Only required when connecting to Redis via Sentinal (Failover mode). Default ""
-	MasterName string `json:"master_name"`
-	// KeyPrefix A string prefix that is appended to Redis keys. Default: "caddy"
-	// Useful when the Redis server is used by multiple applications.
-	KeyPrefix string `json:"key_prefix"`
-	// EncryptionKey A key string used to symmetrically encrypt and decrypt data stored in Redis.
-	// The key must be exactly 32 characters, longer values will be truncated. Default: "" (No encryption)
-	EncryptionKey string `json:"encryption_key"`
-	// Compression Specifies whether values should be compressed before storing in Redis. Default: false
-	TlsEnabled bool `json:"tls_enabled"`
-	// TlsInsecure controls whether the client will verify the server
-	// certificate. See `InsecureSkipVerify` in `tls.Config` for details. True
-	// by default.
-	// https://pkg.go.dev/crypto/tls#Config
-	TlsInsecure bool `json:"tls_insecure"`
-	// TlsServerCertsPEM is a series of PEM encoded certificates that will be
-	// used by the client to validate trust in the Redis server's certificate
-	// instead of the system trust store. May not be specified alongside
-	// `TlsServerCertsPath`. See `x509.CertPool.AppendCertsFromPem` for details.
-	// https://pkg.go.dev/crypto/x509#CertPool.AppendCertsFromPEM
-	TlsServerCertsPEM string `json:"tls_server_certs_pem"`
-	// TlsServerCertsPath is the path to a file containing a series of PEM
-	// encoded certificates that will be used by the client to validate trust in
-	// the Redis server's certificate instead of the system trust store. May not
-	// be specified alongside `TlsServerCertsPem`. See
-	// `x509.CertPool.AppendCertsFromPem` for details.
-	// https://pkg.go.dev/crypto/x509#CertPool.AppendCertsFromPEM
-	TlsServerCertsPath string `json:"tls_server_certs_path"`
-	// RouteByLatency Route commands by latency, only used in Cluster mode. Default: false
-	RouteByLatency bool `json:"route_by_latency"`
-	// RouteRandomly Route commands randomly, only used in Cluster mode. Default: false
-	RouteRandomly bool `json:"route_randomly"`
-
-	client redis.UniversalClient
-	locker *redislock.Client
-	logger *zap.SugaredLogger
-	locks  *sync.Map
-	ctx    context.Context
-}
-
 func init() {
-	caddy.RegisterModule(SessionTokenMiddleware{})
+	caddy.RegisterModule(SessionToJwt{})
 	httpcaddyfile.RegisterHandlerDirective("session_to_jwt", parseCaddyfile)
 }
 
-// CaddyModule returns the Caddy module information.
-func (SessionTokenMiddleware) CaddyModule() caddy.ModuleInfo {
+// SessionToJwt ruilt op matched paden de better-auth sessie-cookie in voor een JWT
+// (opgevraagd bij een upstream token-endpoint) en zet die als Authorization-header.
+type SessionToJwt struct {
+	// JwtUrl is het token-endpoint dat een cookie inruilt voor { token, exp }.
+	JwtUrl string `json:"jwt_url"`
+	// SharedSecret wordt als x-proxy-secret meegestuurd naar JwtUrl.
+	SharedSecret string `json:"shared_secret"`
+	// CookieName is de naam van de better-auth sessie-cookie. Default: better-auth.session_token.
+	CookieName string `json:"cookie_name"`
+	// CacheTtlSeconds is de max cache-duur van een JWT. Default: 300 (5 min).
+	CacheTtlSeconds int `json:"cache_ttl_seconds"`
+
+	cache  *Cache
+	logger *zap.Logger
+}
+
+func (SessionToJwt) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.session_to_jwt",
-		New: func() caddy.Module { return new(SessionTokenMiddleware) },
+		New: func() caddy.Module { return new(SessionToJwt) },
 	}
 }
 
-func (m SessionTokenMiddleware) parseJwtFromUrl(body io.Reader) (string, time.Time, time.Time, error) {
-	// Parse body
-	var jwtResponse struct {
-		Token         string    `json:"token"`
-		TokenExpiry   time.Time `json:"token_expiry"`
-		SessionExpiry time.Time `json:"session_expiry"`
+func (m *SessionToJwt) Provision(ctx caddy.Context) error {
+	m.logger = ctx.Logger()
+	if m.CookieName == "" {
+		m.CookieName = "better-auth.session_token"
 	}
-	err := json.NewDecoder(body).Decode(&jwtResponse)
-	if err != nil {
-		return "", time.Time{}, time.Time{}, fmt.Errorf("Error decoding JWT response: %v", err)
+	if m.CacheTtlSeconds == 0 {
+		m.CacheTtlSeconds = 300
 	}
-	return jwtResponse.Token, jwtResponse.TokenExpiry, jwtResponse.SessionExpiry, nil
+	m.cache = NewCache()
+	return nil
 }
 
-// ServeHTTP implements caddyhttp.MiddlewareHandler.
-func (m SessionTokenMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
-	sessionID, err := r.Cookie("__Secure-authjs.session-token")
-	if err != nil {
-		// Cookie not present, continue to the next handler
-		m.logger.Info("no session cookie found")
+type tokenResponse struct {
+	Token string `json:"token"`
+	Exp   int64  `json:"exp"`
+}
+
+func (m *SessionToJwt) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	cookie, err := r.Cookie(m.CookieName)
+	if err != nil || cookie.Value == "" {
+		// Geen sessie-cookie: laat door zonder JWT (upstream/Hasura valt terug op unauthorized-role).
 		return next.ServeHTTP(w, r)
 	}
-	m.logger.Info("Session ID found: ", sessionID.Value)
-	// Check if session ID is in the map
-	m.logger.Info("context ", m.ctx)
-	token, err := m.Load(m.ctx, sessionID.Value)
-	m.logger.Info("token ", zap.String("token", token))
 
-	if token == "" && err != nil {
-		// if no session found, check if jwt can be obtained from url
-		if m.GetJwtFromUrl {
-			// request jwt from url, using sessionID as a parameter
-			resp, err := http.Get(m.JwtUrl + "?session_id=" + sessionID.Value)
-			if err != nil {
-				m.logger.Error("Error getting JWT from url", zap.Error(err))
-				return next.ServeHTTP(w, r)
-			}
-			// body in format {"token": "jwt", "expiry": "2021-01-01T00:00:00Z", session_expiry: "2021-01-01T00:00:00Z"}
-			// parse body
-			token, expiryToken, expirySession, err := m.parseJwtFromUrl(resp.Body)
-			// transform string to bytes[]
-			tokenBytes := []byte(token)
+	// 1) Cache?
+	if cached, ok := m.cache.Get(cookie.Value); ok {
+		r.Header.Set("Authorization", "Bearer "+string(cached))
+		return next.ServeHTTP(w, r)
+	}
 
-			if err := m.Store(m.ctx, sessionID.Value, tokenBytes, expiryToken, expirySession); err != nil {
-				m.logger.Error("Error storing JWT in Redis", zap.Error(err))
-			}
-		} else {
-			// Session ID not found, just continue to the next handler
-			m.logger.Info("Session ID not found", zap.String("session_id", sessionID.Value))
-			return next.ServeHTTP(w, r)
+	// 2) Token ophalen bij het Next-endpoint (cookie doorsturen).
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, m.JwtUrl, nil)
+	if err != nil {
+		m.logger.Error("kon token-request niet maken", zap.Error(err))
+		return next.ServeHTTP(w, r)
+	}
+	req.Header.Set("x-proxy-secret", m.SharedSecret)
+	req.Header.Set("Cookie", r.Header.Get("Cookie"))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		m.logger.Error("token-endpoint onbereikbaar", zap.Error(err))
+		return next.ServeHTTP(w, r)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		// 401/403: geen geldige sessie -> doorlaten zonder JWT.
+		return next.ServeHTTP(w, r)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	var tr tokenResponse
+	if err := json.Unmarshal(body, &tr); err != nil || tr.Token == "" {
+		m.logger.Error("ongeldige token-response", zap.Error(err))
+		return next.ServeHTTP(w, r)
+	}
+
+	// 3) Cachen (TTL = min(CacheTtl, tot exp)) en header zetten.
+	ttl := m.CacheTtlSeconds
+	if tr.Exp > 0 {
+		if untilExp := int(tr.Exp - time.Now().Unix()); untilExp > 0 && untilExp < ttl {
+			ttl = untilExp
 		}
 	}
-
-	if token != "" {
-		r.Header.Set("Authorization", "Bearer "+string(token))
-		// todo: extend session expiry time if needed
-
-		r = r.WithContext(context.WithValue(r.Context(), "auth_token", token)) // Add token to context
-		m.logger.Debug("Authorization header added", string(token))
-		// log all Header values
-		m.logger.Debug("Header length", len(r.Header))
-		for name, values := range r.Header {
-	    m.logger.Debug("request header" + "key" + name + "values" + strings.Join(values, ","))
-    }
-	} else {
-		// Session ID not found, just continue to the next handler
-		m.logger.Info("Session ID not found in map", zap.String("session_id", sessionID.Value))
-
-	}
+	m.cache.Set(cookie.Value, []byte(tr.Token), ttl)
+	r.Header.Set("Authorization", "Bearer "+tr.Token)
 	return next.ServeHTTP(w, r)
 }
 
-// Interface guards
+// --- Caddyfile ---
+
+func (m *SessionToJwt) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	for d.Next() {
+		for d.NextBlock(0) {
+			switch d.Val() {
+			case "jwt_url":
+				if !d.Args(&m.JwtUrl) {
+					return d.ArgErr()
+				}
+			case "shared_secret":
+				if !d.Args(&m.SharedSecret) {
+					return d.ArgErr()
+				}
+			case "cookie_name":
+				if !d.Args(&m.CookieName) {
+					return d.ArgErr()
+				}
+			case "cache_ttl_seconds":
+				var v string
+				if !d.Args(&v) {
+					return d.ArgErr()
+				}
+				ttl, err := time.ParseDuration(v + "s")
+				if err != nil {
+					return d.Errf("ongeldige cache_ttl_seconds: %v", err)
+				}
+				m.CacheTtlSeconds = int(ttl.Seconds())
+			default:
+				return d.Errf("onbekende optie: %s", d.Val())
+			}
+		}
+	}
+	return nil
+}
+
+func parseCaddyfile(h httpcaddyfile.Helper) (caddyhttp.MiddlewareHandler, error) {
+	var m SessionToJwt
+	err := m.UnmarshalCaddyfile(h.Dispenser)
+	return &m, err
+}
+
 var (
-	_ caddy.Provisioner           = (*SessionTokenMiddleware)(nil)
-	_ caddy.Validator             = (*SessionTokenMiddleware)(nil)
-	_ caddyhttp.MiddlewareHandler = (*SessionTokenMiddleware)(nil)
-	_ caddyfile.Unmarshaler       = (*SessionTokenMiddleware)(nil)
+	_ caddy.Provisioner           = (*SessionToJwt)(nil)
+	_ caddyhttp.MiddlewareHandler = (*SessionToJwt)(nil)
+	_ caddyfile.Unmarshaler       = (*SessionToJwt)(nil)
 )
