@@ -49,7 +49,7 @@ func (m *SessionToJwt) Provision(ctx caddy.Context) error {
 	if m.CacheTtlSeconds == 0 {
 		m.CacheTtlSeconds = 300
 	}
-	m.cache = NewCache()
+	m.cache = SharedCache()
 	return nil
 }
 
