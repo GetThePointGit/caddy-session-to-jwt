@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -58,7 +59,23 @@ type tokenResponse struct {
 	Exp   int64  `json:"exp"`
 }
 
+// isWebsocketUpgrade herkent de HTTP-request waarmee een websocket wordt geopend.
+func isWebsocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
 func (m *SessionToJwt) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// Websocket-upgrade: bewust geen JWT injecteren (waterworks#287). De client
+	// stuurt zijn eigen (rol-specifieke) JWT in de connection_init-payload; zet
+	// de proxy er daarnaast een in de handshake-header, dan voegt Hasura beide
+	// headersets samen, ziet twee JWT's en weigert de connectie met "Could not
+	// verify JWT: Multiple JWTs found". Injecteren heeft hier ook geen functie:
+	// de rol komt uit connection_init, en een header-JWT op een langlopende
+	// socket kan niet ververst worden als hij verloopt.
+	if isWebsocketUpgrade(r) {
+		return next.ServeHTTP(w, r)
+	}
+
 	cookie, err := r.Cookie(m.CookieName)
 	if err != nil || cookie.Value == "" {
 		// Geen sessie-cookie: laat door zonder JWT (upstream/Hasura valt terug op unauthorized-role).
