@@ -63,3 +63,62 @@ func TestServeHTTP_NoCookiePassesThrough(t *testing.T) {
 		t.Fatal("zonder cookie moet 'ie doorlaten")
 	}
 }
+
+func TestServeHTTP_WebsocketUpgradeGetsNoJwt(t *testing.T) {
+	// Token-endpoint dat zou falen als het toch werd aangeroepen: de upgrade
+	// hoort er niet langs te komen (waterworks#287).
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("token-endpoint aangeroepen voor een websocket-upgrade")
+		w.Write([]byte(`{"token":"jwt-abc","exp":0}`))
+	}))
+	defer ts.Close()
+
+	m := &SessionToJwt{JwtUrl: ts.URL, SharedSecret: "s3cret", CookieName: "better-auth.session_token", CacheTtlSeconds: 300, logger: zap.NewNop(), cache: NewCache()}
+
+	called := false
+	var seen string
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		called = true
+		seen = r.Header.Get("Authorization")
+		return nil
+	})
+
+	req := httptest.NewRequest("GET", "http://x/v1/graphql", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: "sess123"})
+	if err := m.ServeHTTP(httptest.NewRecorder(), req, next); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("upgrade moet doorgelaten worden")
+	}
+	if seen != "" {
+		t.Fatalf("upgrade mag geen Authorization-header krijgen, kreeg %q", seen)
+	}
+}
+
+func TestServeHTTP_WebsocketUpgradeIsCaseInsensitive(t *testing.T) {
+	// Werkend token-endpoint: zonder de upgrade-check zou hier een Authorization
+	// -header uit rollen, dus de assertie hieronder is niet vacuum.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"token":"jwt-abc","exp":0}`))
+	}))
+	defer ts.Close()
+
+	m := &SessionToJwt{JwtUrl: ts.URL, SharedSecret: "s3cret", CookieName: "better-auth.session_token", CacheTtlSeconds: 300, logger: zap.NewNop(), cache: NewCache()}
+	var seen string
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		seen = r.Header.Get("Authorization")
+		return nil
+	})
+	req := httptest.NewRequest("GET", "http://x/v1/graphql", nil)
+	req.Header.Set("Upgrade", "WebSocket")
+	req.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: "sess123"})
+	if err := m.ServeHTTP(httptest.NewRecorder(), req, next); err != nil {
+		t.Fatal(err)
+	}
+	if seen != "" {
+		t.Fatalf("Upgrade-waarde hoort case-insensitief te matchen, kreeg %q", seen)
+	}
+}
