@@ -21,6 +21,8 @@ func init() {
 
 // SessionToJwt ruilt op matched paden de better-auth sessie-cookie in voor een JWT
 // (opgevraagd bij een upstream token-endpoint) en zet die als Authorization-header.
+// Native apps sturen in plaats van de cookie `Authorization: Bearer <app-token>`;
+// dat wordt op dezelfde manier ingeruild (zie bearer.go).
 type SessionToJwt struct {
 	// JwtUrl is het token-endpoint dat een cookie inruilt voor { token, exp }.
 	JwtUrl string `json:"jwt_url"`
@@ -33,6 +35,8 @@ type SessionToJwt struct {
 
 	cache  *Cache
 	logger *zap.Logger
+	// bearerClient doet de token-call op het bearer-pad (nil = client met defaultBearerTimeout).
+	bearerClient *http.Client
 }
 
 func (SessionToJwt) CaddyModule() caddy.ModuleInfo {
@@ -72,15 +76,31 @@ func (m *SessionToJwt) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 	// verify JWT: Multiple JWTs found". Injecteren heeft hier ook geen functie:
 	// de rol komt uit connection_init, en een header-JWT op een langlopende
 	// socket kan niet ververst worden als hij verloopt.
+	//
+	// Een door de client meegestuurde Authorization (bv. het app-token van het
+	// bearer-pad) gaat op een upgrade nooit door naar upstream: strippen.
 	if isWebsocketUpgrade(r) {
+		r.Header.Del("Authorization")
 		return next.ServeHTTP(w, r)
 	}
 
+	_, hasAuth := r.Header["Authorization"]
 	cookie, err := r.Cookie(m.CookieName)
-	if err != nil || cookie.Value == "" {
+	hasCookie := err == nil && cookie.Value != ""
+
+	switch {
+	case hasCookie && hasAuth:
+		// Cookie én Authorization: niet raden welke bedoeld is.
+		return writeJSONError(w, http.StatusBadRequest, errAmbiguousCredentials)
+	case hasAuth:
+		// Alleen Authorization: bearer-pad (native apps), fail-closed.
+		return m.serveBearer(w, r, next)
+	case !hasCookie:
 		// Geen sessie-cookie: laat door zonder JWT (upstream/Hasura valt terug op unauthorized-role).
 		return next.ServeHTTP(w, r)
 	}
+
+	// Vanaf hier: cookie-pad (browser), ongewijzigd en fail-open.
 
 	// 1) Cache?
 	if cached, ok := m.cache.Get(cookie.Value); ok {
@@ -115,15 +135,20 @@ func (m *SessionToJwt) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 	}
 
 	// 3) Cachen (TTL = min(CacheTtl, tot exp)) en header zetten.
+	m.cache.Set(cookie.Value, []byte(tr.Token), m.ttlFor(tr.Exp))
+	r.Header.Set("Authorization", "Bearer "+tr.Token)
+	return next.ServeHTTP(w, r)
+}
+
+// ttlFor geeft de cache-TTL in seconden: min(CacheTtlSeconds, tijd tot exp).
+func (m *SessionToJwt) ttlFor(exp int64) int {
 	ttl := m.CacheTtlSeconds
-	if tr.Exp > 0 {
-		if untilExp := int(tr.Exp - time.Now().Unix()); untilExp > 0 && untilExp < ttl {
+	if exp > 0 {
+		if untilExp := int(exp - time.Now().Unix()); untilExp > 0 && untilExp < ttl {
 			ttl = untilExp
 		}
 	}
-	m.cache.Set(cookie.Value, []byte(tr.Token), ttl)
-	r.Header.Set("Authorization", "Bearer "+tr.Token)
-	return next.ServeHTTP(w, r)
+	return ttl
 }
 
 // --- Caddyfile ---
