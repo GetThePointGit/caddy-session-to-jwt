@@ -14,7 +14,7 @@ import (
 )
 
 // fakeTokenEndpoint simuleert proxy-jwt voor het bearer-pad: controleert secret,
-// verwacht géén cookie, en geeft per (token, org) een JWT terug.
+// verwacht géén cookie en géén X-Wit-Org, en geeft per token een JWT terug.
 func fakeTokenEndpoint(t *testing.T, hits *int32) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,13 +34,10 @@ func fakeTokenEndpoint(t *testing.T, hits *int32) *httptest.Server {
 			w.Write([]byte(`{"error":"invalid_session"}`))
 			return
 		}
-		org := r.Header.Get("X-Wit-Org")
-		if org == "999" {
-			w.WriteHeader(403)
-			w.Write([]byte(`{"error":"org_not_allowed"}`))
-			return
+		if _, ok := r.Header["X-Wit-Org"]; ok {
+			t.Error("bearer-pad mag X-Wit-Org niet naar het token-endpoint sturen")
 		}
-		w.Write([]byte(`{"token":"jwt-app-` + org + `","exp":0}`))
+		w.Write([]byte(`{"token":"jwt-app","exp":0}`))
 	}))
 }
 
@@ -62,13 +59,10 @@ func (n *recordingNext) handler() caddyhttp.Handler {
 	})
 }
 
-func bearerReq(token, org string) *http.Request {
+func bearerReq(token string) *http.Request {
 	req := httptest.NewRequest("POST", "http://x/v1/graphql", nil)
 	if token != "" {
 		req.Header.Set("Authorization", token)
-	}
-	if org != "" {
-		req.Header.Set("X-Wit-Org", org)
 	}
 	return req
 }
@@ -95,13 +89,13 @@ func TestBearer_ValidTokenGetsJwtAndPhantomNeverForwarded(t *testing.T) {
 
 	n := &recordingNext{}
 	rec := httptest.NewRecorder()
-	if err := m.ServeHTTP(rec, bearerReq("Bearer app-good", "42"), n.handler()); err != nil {
+	if err := m.ServeHTTP(rec, bearerReq("Bearer app-good"), n.handler()); err != nil {
 		t.Fatal(err)
 	}
 	if !n.called {
 		t.Fatal("upstream had aangeroepen moeten worden")
 	}
-	if len(n.auth) != 1 || n.auth[0] != "Bearer jwt-app-42" {
+	if len(n.auth) != 1 || n.auth[0] != "Bearer jwt-app" {
 		t.Fatalf("upstream moet precies de JWT zien, kreeg %q", n.auth)
 	}
 	for _, a := range n.auth {
@@ -118,15 +112,15 @@ func TestBearer_LowercaseSchemeAccepted(t *testing.T) {
 	m := newBearerModule(ts.URL)
 	n := &recordingNext{}
 	// Token-endpoint krijgt altijd een genormaliseerde "Bearer <x>".
-	if err := m.ServeHTTP(httptest.NewRecorder(), bearerReq("bearer app-good", ""), n.handler()); err != nil {
+	if err := m.ServeHTTP(httptest.NewRecorder(), bearerReq("bearer app-good"), n.handler()); err != nil {
 		t.Fatal(err)
 	}
-	if len(n.auth) != 1 || n.auth[0] != "Bearer jwt-app-" {
+	if len(n.auth) != 1 || n.auth[0] != "Bearer jwt-app" {
 		t.Fatalf("kreeg %q", n.auth)
 	}
 }
 
-func TestBearer_CachedPerTokenAndOrg(t *testing.T) {
+func TestBearer_CachedPerToken(t *testing.T) {
 	var hits int32
 	ts := fakeTokenEndpoint(t, &hits)
 	defer ts.Close()
@@ -134,32 +128,15 @@ func TestBearer_CachedPerTokenAndOrg(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		n := &recordingNext{}
-		if err := m.ServeHTTP(httptest.NewRecorder(), bearerReq("Bearer app-good", "42"), n.handler()); err != nil {
+		if err := m.ServeHTTP(httptest.NewRecorder(), bearerReq("Bearer app-good"), n.handler()); err != nil {
 			t.Fatal(err)
 		}
-		if n.auth[0] != "Bearer jwt-app-42" {
+		if n.auth[0] != "Bearer jwt-app" {
 			t.Fatalf("kreeg %q", n.auth)
 		}
 	}
 	if hits != 1 {
-		t.Fatalf("zelfde token+org: verwachtte 1 token-call, kreeg %d", hits)
-	}
-
-	n := &recordingNext{}
-	if err := m.ServeHTTP(httptest.NewRecorder(), bearerReq("Bearer app-good", "7"), n.handler()); err != nil {
-		t.Fatal(err)
-	}
-	if n.auth[0] != "Bearer jwt-app-7" || hits != 2 {
-		t.Fatalf("andere org moet opnieuw ophalen: auth=%q hits=%d", n.auth, hits)
-	}
-
-	// Zonder org is ook een eigen cache-entry.
-	n = &recordingNext{}
-	if err := m.ServeHTTP(httptest.NewRecorder(), bearerReq("Bearer app-good", ""), n.handler()); err != nil {
-		t.Fatal(err)
-	}
-	if n.auth[0] != "Bearer jwt-app-" || hits != 3 {
-		t.Fatalf("zonder org: auth=%q hits=%d", n.auth, hits)
+		t.Fatalf("zelfde token: verwachtte 1 token-call, kreeg %d", hits)
 	}
 
 	// Bearer-cache staat los van de cookie-namespace.
@@ -175,7 +152,7 @@ func TestBearer_CookieAndAuthorizationIsAmbiguous(t *testing.T) {
 	m := newBearerModule(ts.URL)
 
 	n := &recordingNext{}
-	req := bearerReq("Bearer app-good", "")
+	req := bearerReq("Bearer app-good")
 	req.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: "sess123"})
 	rec := httptest.NewRecorder()
 	if err := m.ServeHTTP(rec, req, n.handler()); err != nil {
@@ -195,57 +172,41 @@ func TestBearer_InvalidTokenIs401(t *testing.T) {
 
 	n := &recordingNext{}
 	rec := httptest.NewRecorder()
-	_ = m.ServeHTTP(rec, bearerReq("Bearer app-bad", ""), n.handler())
+	_ = m.ServeHTTP(rec, bearerReq("Bearer app-bad"), n.handler())
 	assertJSONError(t, rec, http.StatusUnauthorized, "invalid_session")
 	if n.called {
 		t.Fatal("upstream mag niet aangeroepen worden")
 	}
 	// Negatieve resultaten worden niet gecachet.
-	_ = m.ServeHTTP(httptest.NewRecorder(), bearerReq("Bearer app-bad", ""), n.handler())
+	_ = m.ServeHTTP(httptest.NewRecorder(), bearerReq("Bearer app-bad"), n.handler())
 	if hits != 2 {
 		t.Fatalf("negatief resultaat mag niet gecachet worden, hits=%d", hits)
 	}
 }
 
-func TestBearer_OrgNotAllowedIs403(t *testing.T) {
+// X-Wit-Org bestaat niet meer: het JWT draagt altijd de thuisorganisatie. Een
+// meegestuurde header (geldig of niet) verandert niets en gaat niet naar het
+// token-endpoint (fakeTokenEndpoint faalt dan).
+func TestBearer_OrgHeaderIgnored(t *testing.T) {
 	var hits int32
 	ts := fakeTokenEndpoint(t, &hits)
 	defer ts.Close()
 	m := newBearerModule(ts.URL)
 
-	n := &recordingNext{}
-	rec := httptest.NewRecorder()
-	_ = m.ServeHTTP(rec, bearerReq("Bearer app-good", "999"), n.handler())
-	assertJSONError(t, rec, http.StatusForbidden, "org_not_allowed")
-	if n.called || hits != 1 {
-		t.Fatalf("called=%v hits=%d", n.called, hits)
-	}
-}
-
-func TestBearer_InvalidOrgFormatIs403WithoutTokenCall(t *testing.T) {
-	var hits int32
-	ts := fakeTokenEndpoint(t, &hits)
-	defer ts.Close()
-	m := newBearerModule(ts.URL)
-
-	for _, org := range []string{"abc", "12345678901", "-1", "1 2", "4x", " 42"} {
+	for _, org := range []string{"42", "7", "abc", ""} {
 		n := &recordingNext{}
 		rec := httptest.NewRecorder()
-		_ = m.ServeHTTP(rec, bearerReq("Bearer app-good", org), n.handler())
-		assertJSONError(t, rec, http.StatusForbidden, "org_not_allowed")
-		if n.called {
-			t.Fatalf("org %q: upstream mag niet aangeroepen worden", org)
+		req := bearerReq("Bearer app-good")
+		req.Header["X-Wit-Org"] = []string{org}
+		if err := m.ServeHTTP(rec, req, n.handler()); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Code != http.StatusOK || !n.called || n.auth[0] != "Bearer jwt-app" {
+			t.Fatalf("org %q: status=%d called=%v auth=%q", org, rec.Code, n.called, n.auth)
 		}
 	}
-	// Aanwezig maar leeg telt ook als ongeldig formaat.
-	req := bearerReq("Bearer app-good", "")
-	req.Header["X-Wit-Org"] = []string{""}
-	rec := httptest.NewRecorder()
-	_ = m.ServeHTTP(rec, req, (&recordingNext{}).handler())
-	assertJSONError(t, rec, http.StatusForbidden, "org_not_allowed")
-
-	if hits != 0 {
-		t.Fatalf("token-endpoint mag niet aangeroepen worden, hits=%d", hits)
+	if hits != 1 {
+		t.Fatalf("één cache-entry per token, ongeacht X-Wit-Org: hits=%d", hits)
 	}
 }
 
@@ -276,7 +237,7 @@ func TestBearer_EndpointFailuresAre503(t *testing.T) {
 			m.bearerClient = &http.Client{Timeout: 50 * time.Millisecond}
 			n := &recordingNext{}
 			rec := httptest.NewRecorder()
-			_ = m.ServeHTTP(rec, bearerReq("Bearer app-good", "42"), n.handler())
+			_ = m.ServeHTTP(rec, bearerReq("Bearer app-good"), n.handler())
 			assertJSONError(t, rec, http.StatusServiceUnavailable, "auth_unavailable")
 			if n.called {
 				t.Fatal("fail-closed: upstream mag niet aangeroepen worden")
@@ -291,7 +252,7 @@ func TestBearer_EndpointFailuresAre503(t *testing.T) {
 		m := newBearerModule(url)
 		n := &recordingNext{}
 		rec := httptest.NewRecorder()
-		_ = m.ServeHTTP(rec, bearerReq("Bearer app-good", ""), n.handler())
+		_ = m.ServeHTTP(rec, bearerReq("Bearer app-good"), n.handler())
 		assertJSONError(t, rec, http.StatusServiceUnavailable, "auth_unavailable")
 		if n.called {
 			t.Fatal("fail-closed: upstream mag niet aangeroepen worden")
@@ -335,7 +296,7 @@ func TestBearer_WebsocketUpgradeStripsAuthorization(t *testing.T) {
 	m := newBearerModule(ts.URL)
 
 	n := &recordingNext{}
-	req := bearerReq("Bearer app-good", "42")
+	req := bearerReq("Bearer app-good")
 	req.Method = "GET"
 	req.Header.Set("Connection", "Upgrade")
 	req.Header.Set("Upgrade", "websocket")
@@ -353,13 +314,11 @@ func TestBearer_WebsocketUpgradeStripsAuthorization(t *testing.T) {
 	}
 }
 
-func TestEvict_BearerRemovesAllOrgVariants(t *testing.T) {
+func TestEvict_BearerRemovesToken(t *testing.T) {
 	c := SharedCache()
-	c.SetBearer("app-tok", "", []byte("jwt-a"), 300)
-	c.SetBearer("app-tok", "42", []byte("jwt-b"), 300)
-	c.SetBearer("app-tok", "7", []byte("jwt-c"), 300)
-	c.SetBearer("app-tok:42", "", []byte("jwt-ander"), 300) // ander token met ':' erin
-	c.SetBearer("ander", "42", []byte("jwt-d"), 300)
+	c.SetBearer("app-tok", []byte("jwt-a"), 300)
+	c.SetBearer("app-tok-2", []byte("jwt-ander"), 300) // token met dezelfde prefix
+	c.SetBearer("ander", []byte("jwt-d"), 300)
 	c.Set("app-tok", []byte("jwt-cookie"), 300) // cookie-namespace met dezelfde waarde
 
 	m := &SessionToJwtEvict{SharedSecret: "s3cret", CookieName: "better-auth.session_token", logger: zap.NewNop()}
@@ -372,7 +331,7 @@ func TestEvict_BearerRemovesAllOrgVariants(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("zonder secret verwacht 403, kreeg %d", rec.Code)
 	}
-	if _, ok := c.GetBearer("app-tok", "42"); !ok {
+	if _, ok := c.GetBearer("app-tok"); !ok {
 		t.Fatal("403 mag niets verwijderen")
 	}
 
@@ -384,15 +343,13 @@ func TestEvict_BearerRemovesAllOrgVariants(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("verwacht 204, kreeg %d", rec.Code)
 	}
-	for _, org := range []string{"", "42", "7"} {
-		if _, ok := c.GetBearer("app-tok", org); ok {
-			t.Fatalf("org %q had verwijderd moeten zijn", org)
-		}
+	if _, ok := c.GetBearer("app-tok"); ok {
+		t.Fatal("app-tok had verwijderd moeten zijn")
 	}
-	if _, ok := c.GetBearer("app-tok:42", ""); !ok {
-		t.Fatal("ander token (met ':') mag niet geraakt worden")
+	if _, ok := c.GetBearer("app-tok-2"); !ok {
+		t.Fatal("token met dezelfde prefix mag niet geraakt worden")
 	}
-	if _, ok := c.GetBearer("ander", "42"); !ok {
+	if _, ok := c.GetBearer("ander"); !ok {
 		t.Fatal("ander token mag niet geraakt worden")
 	}
 	if _, ok := c.Get("app-tok"); !ok {

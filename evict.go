@@ -49,8 +49,8 @@ func (m *SessionToJwtEvict) ServeHTTP(w http.ResponseWriter, r *http.Request, _ 
 	if cookie, err := r.Cookie(m.CookieName); err == nil && cookie.Value != "" {
 		SharedCache().Delete(cookie.Value)
 	}
-	// App-uitlog: `Authorization: Bearer <app-token>` verwijdert alle
-	// "bearer:<app-token>:*"-entries (elke X-Wit-Org-variant).
+	// App-uitlog: `Authorization: Bearer <app-token>` verwijdert de entry
+	// "bearer:<app-token>".
 	if tok, ok := parseBearer(r.Header.Get("Authorization")); ok {
 		SharedCache().DeleteBearer(tok)
 	}

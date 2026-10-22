@@ -9,8 +9,9 @@ Er zijn twee paden:
   Fail-open: lukt dat niet, dan gaat de request zonder JWT door (Hasura valt terug op de
   unauthorized-role).
 - **Bearer-pad (native apps, "phantom token"):** de app stuurt
-  `Authorization: Bearer <app-token>` en optioneel `X-Wit-Org`. Het app-token wordt
-  ingeruild voor een JWT. Fail-closed: zonder verse JWT gaat er niets naar upstream, en
+  `Authorization: Bearer <app-token>`. Het app-token wordt ingeruild voor een JWT (met
+  de thuisorganisatie van de gebruiker; er is geen organisatiekeuze per verzoek).
+  Fail-closed: zonder verse JWT gaat er niets naar upstream, en
   het app-token bereikt upstream nooit.
 
 ## Installation
@@ -64,22 +65,20 @@ hij wordt omgezet in een JWT of de request wordt geweigerd.
 
 ### Bearer-pad
 
-1. `X-Wit-Org` is optioneel; als hij er is moet hij `^[0-9]{1,10}$` matchen, anders
-   `403 {"error":"org_not_allowed"}` (zonder token-call).
-2. Cache-key `bearer:<x>:<org>` (org leeg als de header ontbreekt), los van de cookie-keys.
-3. Bij een cache-miss: `POST jwt_url` met `x-proxy-secret`, `Authorization: Bearer <x>` en
-   (indien aanwezig) `X-Wit-Org`. Géén cookie. Time-out 10s.
-4. Response van het token-endpoint:
+1. Cache-key `bearer:<x>`, los van de cookie-keys. Een meegestuurde `X-Wit-Org` wordt
+   genegeerd en niet doorgestuurd.
+2. Bij een cache-miss: `POST jwt_url` met `x-proxy-secret` en `Authorization: Bearer <x>`.
+   Géén cookie. Time-out 10s.
+3. Response van het token-endpoint:
 
 | Token-endpoint                                   | Antwoord van de proxy |
 |--------------------------------------------------|-----------------------|
 | `200 {"token","exp"}`                            | cachen, `Authorization: Bearer <jwt>` zetten (overschrijft het app-token), door naar upstream |
 | `401`                                            | `401 {"error":"invalid_session"}` |
-| `403` met body `{"error":"org_not_allowed"}`     | `403 {"error":"org_not_allowed"}` |
 | al het andere (overige 4xx, ook 403 door een fout secret, 5xx, time-out, netwerkfout, ongeldige JSON) | `503 {"error":"auth_unavailable"}` |
 
 Foutantwoorden hebben `Content-Type: application/json`. Negatieve resultaten worden niet
-gecachet. Tokens, `Authorization`, cookies en de combinatie org+token worden nooit gelogd.
+gecachet. Tokens, `Authorization` en cookies worden nooit gelogd.
 
 ## Evict (uitloggen)
 
@@ -87,8 +86,7 @@ gecachet. Tokens, `Authorization`, cookies en de combinatie org+token worden noo
 (anders `403`). Antwoordt altijd `204` (idempotent).
 
 - Met de sessie-cookie: verwijdert de JWT van die cookie (ongewijzigd).
-- Met `Authorization: Bearer <x>`: verwijdert alle entries `bearer:<x>:*` (elke
-  `X-Wit-Org`-variant).
+- Met `Authorization: Bearer <x>`: verwijdert de entry `bearer:<x>`.
 
 ## compile with custom caddy plugin locally for development
 
@@ -104,12 +102,12 @@ Tests: `go vet ./... && go test ./...`
 
 ### v1.4.0
 - Bearer-pad ("phantom token") voor de native apps: `Authorization: Bearer <app-token>`
-  (+ optioneel `X-Wit-Org`) wordt bij het token-endpoint ingeruild voor een JWT. Fail-closed
-  met JSON-foutbodies (`invalid_session`, `org_not_allowed`, `auth_unavailable`).
+  wordt bij het token-endpoint ingeruild voor een JWT. Fail-closed met JSON-foutbodies
+  (`invalid_session`, `auth_unavailable`).
 - Cookie én `Authorization` tegelijk: `400 {"error":"ambiguous_credentials"}`.
 - **Gedragswijziging:** een door de client meegestuurde `Authorization` werd voorheen zonder
   sessie-cookie (en bij een mislukte cookie-inruil, en op websocket-upgrades) ongewijzigd naar
   upstream doorgestuurd. Nu wordt die omgezet in een JWT of geweigerd, en op
   websocket-upgrades gestript.
-- Evict accepteert `Authorization: Bearer <x>` en verwijdert alle org-varianten van dat token.
+- Evict accepteert `Authorization: Bearer <x>` en verwijdert de JWT van dat token.
 - Cookie-pad verder ongewijzigd.

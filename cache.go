@@ -6,18 +6,17 @@ import (
 )
 
 // Cache is een eenvoudige in-memory key/value-cache met TTL, geschikt voor een
-// beperkt aantal entries (één per actieve sessie-cookie of app-token+org).
+// beperkt aantal entries (één per actieve sessie-cookie of app-token).
 //
 // Er zijn twee gescheiden namespaces:
 //   - items: cookie-pad, key = ruwe waarde van de sessie-cookie (ongewijzigd t.o.v. v1.3).
-//   - bearer: app-pad (Bearer/"phantom token"), logisch de key "bearer:<token>:<org>",
-//     opgeslagen als token -> org -> item. Daardoor kan een cookie-waarde nooit met
-//     een bearer-key botsen, en verwijdert evict "bearer:<token>:*" in O(aantal orgs)
-//     zonder scan en zonder prefix-ambiguïteit (een token met ':' erin).
+//   - bearer: app-pad (Bearer/"phantom token"), logisch de key "bearer:<token>",
+//     opgeslagen als token -> item. Een eigen map, zodat een cookie-waarde nooit met
+//     een app-token kan botsen.
 type Cache struct {
 	mu     sync.RWMutex
 	items  map[string]*Item
-	bearer map[string]map[string]*Item
+	bearer map[string]*Item
 }
 
 // Item is één gecachte waarde met een absolute verlooptijd (unix-seconden).
@@ -28,7 +27,7 @@ type Item struct {
 
 // NewCache maakt een in-memory cache en start de opschoon-goroutine.
 func NewCache() *Cache {
-	c := &Cache{items: make(map[string]*Item), bearer: make(map[string]map[string]*Item)}
+	c := &Cache{items: make(map[string]*Item), bearer: make(map[string]*Item)}
 	go c.cleanup()
 	return c
 }
@@ -76,24 +75,18 @@ func newItem(val []byte, ttl int) *Item {
 	return &Item{Value: valCopy, Expiry: time.Now().Add(time.Duration(ttl) * time.Second).Unix()}
 }
 
-// SetBearer bewaart de JWT voor (app-token, org) — logische key "bearer:<token>:<org>".
-// org is de X-Wit-Org-waarde of "" als die header ontbrak.
-func (c *Cache) SetBearer(token, org string, val []byte, ttl int) {
+// SetBearer bewaart de JWT voor een app-token — logische key "bearer:<token>".
+func (c *Cache) SetBearer(token string, val []byte, ttl int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	orgs, ok := c.bearer[token]
-	if !ok {
-		orgs = make(map[string]*Item)
-		c.bearer[token] = orgs
-	}
-	orgs[org] = newItem(val, ttl)
+	c.bearer[token] = newItem(val, ttl)
 }
 
-// GetBearer geeft een kopie van de JWT voor (app-token, org) als die bestaat en niet verlopen is.
-func (c *Cache) GetBearer(token, org string) ([]byte, bool) {
+// GetBearer geeft een kopie van de JWT voor een app-token als die bestaat en niet verlopen is.
+func (c *Cache) GetBearer(token string) ([]byte, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	item, ok := c.bearer[token][org]
+	item, ok := c.bearer[token]
 	if !ok || time.Now().Unix() > item.Expiry {
 		return nil, false
 	}
@@ -102,7 +95,7 @@ func (c *Cache) GetBearer(token, org string) ([]byte, bool) {
 	return result, true
 }
 
-// DeleteBearer verwijdert alle entries "bearer:<token>:*" (alle org-varianten), bv. bij uitloggen in de app.
+// DeleteBearer verwijdert de entry "bearer:<token>", bv. bij uitloggen in de app.
 func (c *Cache) DeleteBearer(token string) {
 	c.mu.Lock()
 	delete(c.bearer, token)
@@ -133,13 +126,8 @@ func (c *Cache) cleanup() {
 				delete(c.items, k)
 			}
 		}
-		for tok, orgs := range c.bearer {
-			for org, v := range orgs {
-				if now > v.Expiry {
-					delete(orgs, org)
-				}
-			}
-			if len(orgs) == 0 {
+		for tok, v := range c.bearer {
+			if now > v.Expiry {
 				delete(c.bearer, tok)
 			}
 		}

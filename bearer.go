@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -14,22 +13,21 @@ import (
 
 // Bearer-pad ("phantom token") voor de native apps.
 //
-// De app stuurt `Authorization: Bearer <app-token>` (+ optioneel `X-Wit-Org`). Dat
-// app-token is ondoorzichtig voor Hasura: de proxy ruilt het bij het token-endpoint
+// De app stuurt `Authorization: Bearer <app-token>`. Dat app-token is ondoorzichtig voor Hasura: de proxy ruilt het bij het token-endpoint
 // in voor een JWT en vervangt de Authorization-header daarmee. Anders dan het
 // cookie-pad is dit pad fail-CLOSED: zonder verse JWT gaat er niets naar upstream,
 // en het app-token zelf bereikt upstream nooit.
 //
-// LET OP: log nooit tokens, Authorization, cookies of de combinatie org+token.
+// Er is geen organisatiekeuze per verzoek: het token-endpoint geeft een JWT met de
+// thuisorganisatie van de gebruiker. Een meegestuurde `X-Wit-Org` wordt genegeerd en
+// niet doorgestuurd.
+//
+// LET OP: log nooit tokens, Authorization of cookies.
 
 const (
 	errAmbiguousCredentials = "ambiguous_credentials"
 	errInvalidSession       = "invalid_session"
-	errOrgNotAllowed        = "org_not_allowed"
 	errAuthUnavailable      = "auth_unavailable"
-
-	// orgHeader kiest de organisatie waarvoor de app een JWT wil.
-	orgHeader = "X-Wit-Org"
 
 	// defaultBearerTimeout begrenst de token-call op het bearer-pad; bij een
 	// time-out volgt 503 in plaats van een hangende request.
@@ -38,8 +36,6 @@ const (
 	// maxTokenResponseBytes begrenst hoeveel van de token-response we inlezen.
 	maxTokenResponseBytes = 64 << 10
 )
-
-var orgPattern = regexp.MustCompile(`^[0-9]{1,10}$`)
 
 // writeJSONError schrijft een korte JSON-foutbody, bv. {"error":"invalid_session"}.
 func writeJSONError(w http.ResponseWriter, status int, code string) error {
@@ -77,22 +73,13 @@ func (m *SessionToJwt) serveBearer(w http.ResponseWriter, r *http.Request, next 
 		return writeJSONError(w, http.StatusUnauthorized, errInvalidSession)
 	}
 
-	// Optionele X-Wit-Org: alleen cijfers (1-10), anders 403 zonder token-call.
-	org := ""
-	if orgVals := r.Header.Values(orgHeader); len(orgVals) > 0 {
-		if len(orgVals) != 1 || !orgPattern.MatchString(orgVals[0]) {
-			return writeJSONError(w, http.StatusForbidden, errOrgNotAllowed)
-		}
-		org = orgVals[0]
-	}
-
-	// 1) Cache? (namespace "bearer:<token>:<org>", los van de cookie-keys)
-	if cached, ok := m.cache.GetBearer(tok, org); ok {
+	// 1) Cache? (namespace "bearer:<token>", los van de cookie-keys)
+	if cached, ok := m.cache.GetBearer(tok); ok {
 		r.Header.Set("Authorization", "Bearer "+string(cached))
 		return next.ServeHTTP(w, r)
 	}
 
-	// 2) Token ophalen: secret + app-token + org, GEEN cookie.
+	// 2) Token ophalen: secret + app-token, GEEN cookie.
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, m.JwtUrl, nil)
 	if err != nil {
 		m.logger.Error("bearer: kon token-request niet maken", zap.Error(err))
@@ -100,9 +87,6 @@ func (m *SessionToJwt) serveBearer(w http.ResponseWriter, r *http.Request, next 
 	}
 	req.Header.Set("x-proxy-secret", m.SharedSecret)
 	req.Header.Set("Authorization", "Bearer "+tok)
-	if org != "" {
-		req.Header.Set(orgHeader, org)
-	}
 
 	client := m.bearerClient
 	if client == nil {
@@ -123,12 +107,6 @@ func (m *SessionToJwt) serveBearer(w http.ResponseWriter, r *http.Request, next 
 	case http.StatusUnauthorized:
 		return writeJSONError(w, http.StatusUnauthorized, errInvalidSession)
 	case http.StatusForbidden:
-		var er struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(body, &er) == nil && er.Error == errOrgNotAllowed {
-			return writeJSONError(w, http.StatusForbidden, errOrgNotAllowed)
-		}
 		// Bv. 403 door een fout shared secret: configuratieprobleem, niet de schuld van de app.
 		m.logger.Error("bearer: token-endpoint weigerde (403)", zap.Int("status", resp.StatusCode))
 		return writeJSONError(w, http.StatusServiceUnavailable, errAuthUnavailable)
@@ -145,7 +123,7 @@ func (m *SessionToJwt) serveBearer(w http.ResponseWriter, r *http.Request, next 
 
 	// 3) Cachen (zelfde TTL-regel als het cookie-pad) en Authorization OVERSCHRIJVEN,
 	// zodat het app-token nooit upstream terechtkomt.
-	m.cache.SetBearer(tok, org, []byte(tr.Token), m.ttlFor(tr.Exp))
+	m.cache.SetBearer(tok, []byte(tr.Token), m.ttlFor(tr.Exp))
 	r.Header.Set("Authorization", "Bearer "+tr.Token)
 	return next.ServeHTTP(w, r)
 }
