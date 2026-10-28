@@ -29,3 +29,6 @@ go.work.sum
 # Lokale caddy/xcaddy binaries (gebouwd via xcaddy build)
 caddy
 xcaddy
+
+# VS Code settings
+.vscode/

@@ -15,7 +15,8 @@ func init() {
 	httpcaddyfile.RegisterHandlerDirective("session_to_jwt_evict", parseEvictCaddyfile)
 }
 
-// SessionToJwtEvict verwijdert de gecachte JWT voor de meegestuurde sessie-cookie.
+// SessionToJwtEvict verwijdert de gecachte JWT voor de meegestuurde sessie-cookie
+// en/of, bij `Authorization: Bearer <app-token>`, alle gecachte JWT's van dat app-token.
 // Bedoeld als INTERN endpoint dat de Next-server bij uitloggen aanroept; beschermd
 // met hetzelfde shared secret. Niet via de publieke ingress exposen.
 type SessionToJwtEvict struct {
@@ -47,6 +48,11 @@ func (m *SessionToJwtEvict) ServeHTTP(w http.ResponseWriter, r *http.Request, _ 
 	}
 	if cookie, err := r.Cookie(m.CookieName); err == nil && cookie.Value != "" {
 		SharedCache().Delete(cookie.Value)
+	}
+	// App-uitlog: `Authorization: Bearer <app-token>` verwijdert de entry
+	// "bearer:<app-token>".
+	if tok, ok := parseBearer(r.Header.Get("Authorization")); ok {
+		SharedCache().DeleteBearer(tok)
 	}
 	// Idempotent: altijd 204, ook als er niets te verwijderen viel.
 	w.WriteHeader(http.StatusNoContent)

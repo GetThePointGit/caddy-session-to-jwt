@@ -122,3 +122,26 @@ func TestServeHTTP_WebsocketUpgradeIsCaseInsensitive(t *testing.T) {
 		t.Fatalf("Upgrade-waarde hoort case-insensitief te matchen, kreeg %q", seen)
 	}
 }
+
+func TestServeHTTP_CookiePathStaysFailOpen(t *testing.T) {
+	// Cookie-pad is ongewijzigd fail-open: token-endpoint stuk -> toch doorlaten, zonder JWT.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer ts.Close()
+	m := &SessionToJwt{JwtUrl: ts.URL, SharedSecret: "s3cret", CookieName: "better-auth.session_token", CacheTtlSeconds: 300, logger: zap.NewNop(), cache: NewCache()}
+	called := false
+	var seen string
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		called = true
+		seen = r.Header.Get("Authorization")
+		return nil
+	})
+	req := httptest.NewRequest("POST", "http://x/v1/graphql", nil)
+	req.AddCookie(&http.Cookie{Name: "better-auth.session_token", Value: "sess123"})
+	rec := httptest.NewRecorder()
+	if err := m.ServeHTTP(rec, req, next); err != nil {
+		t.Fatal(err)
+	}
+	if !called || seen != "" || rec.Code != 200 {
+		t.Fatalf("fail-open verwacht: called=%v auth=%q code=%d", called, seen, rec.Code)
+	}
+}
