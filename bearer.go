@@ -75,6 +75,7 @@ func (m *SessionToJwt) serveBearer(w http.ResponseWriter, r *http.Request, next 
 
 	// 1) Cache? (namespace "bearer:<token>", los van de cookie-keys)
 	if cached, ok := m.cache.GetBearer(tok); ok {
+		m.tel(cached)
 		r.Header.Set("Authorization", "Bearer "+string(cached))
 		return next.ServeHTTP(w, r)
 	}
@@ -124,6 +125,7 @@ func (m *SessionToJwt) serveBearer(w http.ResponseWriter, r *http.Request, next 
 	// 3) Cachen (zelfde TTL-regel als het cookie-pad) en Authorization OVERSCHRIJVEN,
 	// zodat het app-token nooit upstream terechtkomt.
 	m.cache.SetBearer(tok, []byte(tr.Token), m.ttlFor(tr.Exp))
+	m.tel([]byte(tr.Token))
 	r.Header.Set("Authorization", "Bearer "+tr.Token)
 	return next.ServeHTTP(w, r)
 }
