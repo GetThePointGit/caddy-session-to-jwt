@@ -33,8 +33,10 @@ type SessionToJwt struct {
 	// CacheTtlSeconds is de max cache-duur van een JWT. Default: 300 (5 min).
 	CacheTtlSeconds int `json:"cache_ttl_seconds"`
 
-	cache  *Cache
-	logger *zap.Logger
+	cache *Cache
+	// verbruik telt verzoeken per gebruiker (nil = niet meten, bv. in tests).
+	verbruik *Verbruik
+	logger   *zap.Logger
 	// bearerClient doet de token-call op het bearer-pad (nil = client met defaultBearerTimeout).
 	bearerClient *http.Client
 }
@@ -55,7 +57,8 @@ func (m *SessionToJwt) Provision(ctx caddy.Context) error {
 		m.CacheTtlSeconds = 300
 	}
 	m.cache = SharedCache()
-	return nil
+	m.verbruik = SharedVerbruik()
+	return m.verbruik.Registreer(ctx.GetMetricsRegistry())
 }
 
 type tokenResponse struct {
@@ -104,6 +107,7 @@ func (m *SessionToJwt) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 
 	// 1) Cache?
 	if cached, ok := m.cache.Get(cookie.Value); ok {
+		m.tel(cached)
 		r.Header.Set("Authorization", "Bearer "+string(cached))
 		return next.ServeHTTP(w, r)
 	}
@@ -136,8 +140,16 @@ func (m *SessionToJwt) ServeHTTP(w http.ResponseWriter, r *http.Request, next ca
 
 	// 3) Cachen (TTL = min(CacheTtl, tot exp)) en header zetten.
 	m.cache.Set(cookie.Value, []byte(tr.Token), m.ttlFor(tr.Exp))
+	m.tel([]byte(tr.Token))
 	r.Header.Set("Authorization", "Bearer "+tr.Token)
 	return next.ServeHTTP(w, r)
+}
+
+// tel telt dit verzoek voor de gebruiker van de JWT (zie verbruik.go).
+func (m *SessionToJwt) tel(jwt []byte) {
+	if m.verbruik != nil {
+		m.verbruik.Tel(jwt)
+	}
 }
 
 // ttlFor geeft de cache-TTL in seconden: min(CacheTtlSeconds, tijd tot exp).

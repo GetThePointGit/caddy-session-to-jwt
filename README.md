@@ -88,6 +88,34 @@ gecachet. Tokens, `Authorization` en cookies worden nooit gelogd.
 - Met de sessie-cookie: verwijdert de JWT van die cookie (ongewijzigd).
 - Met `Authorization: Bearer <x>`: verwijdert de entry `bearer:<x>`.
 
+## Meting: verzoeken per gebruiker
+
+De plugin telt hoeveel verzoeken één gebruiker per venster doet (alleen verzoeken
+waar een JWT op gezet wordt; websocket-upgrades en verzoeken zonder sessie niet).
+Aan het eind van elk venster gaat het aantal van elke actieve gebruiker als één
+waarneming in het histogram `session_to_jwt_verzoeken_per_gebruiker`, met het
+label `venster` (`10s` of `60s`). Er is geen label per gebruiker: de uitkomst is
+de verdeling, bedoeld als onderbouwing voor een rate limit per gebruiker.
+
+Het gebruikers-id komt uit de JWT (`sub`, anders de Hasura-claim
+`x-hasura-user-id`). De telling is per proces; met meerdere replica's ziet elke
+pod zijn eigen deel.
+
+Het histogram hangt aan de metrics-registry van Caddy. Ontsluiten kan met de
+`metrics`-directive op een pad dat niet van buiten bereikbaar is:
+
+```
+handle /metrics {
+    metrics
+}
+```
+
+Voorbeeld (p99 van het aantal verzoeken per gebruiker per minuut, over een dag):
+
+```
+histogram_quantile(0.99, sum by (le) (increase(session_to_jwt_verzoeken_per_gebruiker_bucket{venster="60s"}[1d])))
+```
+
 ## compile with custom caddy plugin locally for development
 
 1. installeer go
@@ -99,6 +127,12 @@ gecachet. Tokens, `Authorization` en cookies worden nooit gelogd.
 Tests: `go vet ./... && go test ./...`
 
 ## Changelog
+
+### v1.5.0
+
+- Meting van het aantal verzoeken per gebruiker per venster (histogram
+  `session_to_jwt_verzoeken_per_gebruiker`, waterworks#923). Geen nieuwe
+  Caddyfile-opties; zonder `metrics`-route verandert er niets.
 
 ### v1.4.0
 - Bearer-pad ("phantom token") voor de native apps: `Authorization: Bearer <app-token>`
